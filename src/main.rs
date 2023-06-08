@@ -72,23 +72,41 @@ async fn main() {
 
     // these are the crates that we actually care to publish
     let crates = vec![
+        "quic/s2n-quic",
         "quic/s2n-quic-core",
-        "quic/s2n-quic-platform",
         "quic/s2n-quic-crypto",
+        "quic/s2n-quic-platform",
         "quic/s2n-quic-rustls",
         "quic/s2n-quic-tls",
         "quic/s2n-quic-tls-default",
         "quic/s2n-quic-transport",
-        "quic/s2n-quic",
+        "quic/s2n-quic-xdp",
         "common/s2n-codec",
     ];
+
+    let mut versions = HashMap::new();
+    // use the raw string for find and replace
+    let mut manifests_raw = HashMap::new();
+    // use the parsed manifest to calculate the dependency tree
+    // we can't use cargo tree because it does feature resolution which leaves
+    // dependencies out of the build tree
+    let mut manifests_parsed = HashMap::new();
+    for c in crates.iter() {
+        let manifest_path = format!("{c}/Cargo.toml");
+        let manifest_string = std::fs::read_to_string(&manifest_path).unwrap();
+        let manifest = Manifest::from_path(&manifest_path).unwrap();
+        let version: Version = manifest.package().version().parse().unwrap();
+        manifests_raw.insert((*c).to_owned(), manifest_string);
+        manifests_parsed.insert((*c).to_owned(), manifest);
+        versions.insert((*c).to_owned(), version);
+    }
 
     // build dependency graph
     // we want a list of the immediate dependencies for each of our crates of
     // interest. This is used to calculate which crates need to have their
     // versions bumped.
     // package -> [consumers], e.g. s2n-quic-transport -> [s2n-quic]
-    let dep_graph = build_dep_graph(&crates);
+    let dep_graph = build_dep_graph(&crates, manifests_parsed);
     for (dep, cons) in dep_graph.iter() {
         println!("{} -> {:?}", dep, cons);
     }
@@ -132,19 +150,6 @@ async fn main() {
 
     println!("bumps after cascade: {:?}", &bumps);
 
-    let mut versions = HashMap::new();
-    let mut manifests = HashMap::new();
-    for c in crates.iter() {
-        let manifest_path = format!("{c}/Cargo.toml");
-        let manifest_string = std::fs::read_to_string(&manifest_path).unwrap();
-        let manifest = Manifest::from_path(&manifest_path).unwrap();
-        let version: Version = manifest.package().version().parse().unwrap();
-        manifests.insert(*c, manifest_string);
-        versions.insert((*c).to_owned(), version);
-    }
-
-    println!("parsed versions: {:?}", versions);
-
     // replace crate versions
     for (c, b) in bumps.iter() {
         // we need to bump the version
@@ -154,15 +159,16 @@ async fn main() {
         if *b == Bump::MINOR {
             println!("bumped: {}, {}", old_version, new_version);
         }
-        let new_manifest = manifests
+        let new_manifest = manifests_raw
             .get(c.as_str())
             .unwrap()
             .replace(&old_version, &new_version);
-        manifests.insert(c, new_manifest);
+        manifests_raw.insert(c.to_string(), new_manifest);
     }
 
-    // replace all of the dependencies
+    // for each crate that was updated
     for (c, b) in bumps.iter() {
+        // calculate the dependency string other's used to refer to it
         let v = versions.get(c).unwrap();
         // s2n-codec = { version = "=0.4.0", path = "../../common/s2n-codec", default-features = false }
         let old_dep = format!("{} = {{ version = \"={}\",", crate_name_from_path(c), v);
@@ -171,18 +177,20 @@ async fn main() {
             crate_name_from_path(c),
             v.bump(*b)
         );
+        // if other packages consumed it, update their dependency stuff
         if let Some(consumers) = dep_graph.get(crate_name_from_path(c)) {
             for consumer in consumers {
-                let new_manifest = manifests
+                println!("checking {} for {}", consumer, old_dep);
+                let new_manifest = manifests_raw
                     .get(consumer.as_str())
                     .unwrap()
                     .replace(&old_dep, &new_dep);
-                manifests.insert(consumer, new_manifest);
+                manifests_raw.insert(consumer.to_string(), new_manifest);
             }
         }
     }
 
-    for (crate_path, manifest) in manifests {
+    for (crate_path, manifest) in manifests_raw {
         //let name = crate_name_from_path(crate_path);
         let path = crate_path.to_owned() + "/Cargo.toml";
         println!("writing to {path}");
@@ -194,29 +202,56 @@ async fn main() {
 
     // ensure that no new commits have happened since then
 }
-
-fn build_dep_graph(crates: &Vec<&str>) -> HashMap<String, Vec<String>> {
+/// returns a map from crate to consumers of the crate
+fn build_dep_graph(
+    crates: &Vec<&str>,
+    manifests: HashMap<String, Manifest>,
+) -> HashMap<String, Vec<String>> {
     let mut dep_graph: HashMap<String, Vec<String>> = HashMap::new();
 
-    let crate_names: Vec<&str> = crates
+    let crate_names: Vec<String> = crates
         .iter()
-        .map(|path| path.split_once("/").unwrap().1)
+        .map(|path| path.split_once("/").unwrap().1.to_owned())
         .collect();
 
     let mut name_to_path = HashMap::new();
     for (crate_path, crate_name) in std::iter::zip(crates, crate_names.clone()) {
         name_to_path.insert(crate_name, *crate_path);
     }
-
     // we can not just look at the dependency graph for, e.g. s2n-quic, because
     // some crates, like s2n-quic-rustls won't show up in it. So we look at each
-    for name in crate_names.iter().cloned() {
-        let deps = get_dependencies(name, &crate_names);
+    for name in crates.iter().cloned() {
+        println!("trying to get {:?}", name);
+        println!("manifest keys {:?}", manifests.keys());
+        let manifest = manifests.get(name).unwrap();
+        //if name.contains("tls-default") {
+        //    println!("manifest target: {:?}", manifest.target);
+        //    panic!();
+        //}
+        let deps: Vec<String> = manifest
+            .dependencies
+            .iter()
+            .chain(manifest.build_dependencies.iter())
+            .chain(manifest.dev_dependencies.iter())
+            .chain(
+                manifest
+                    .target
+                    .values()
+                    .map(|target| {
+                        target
+                            .dependencies
+                            .iter()
+                            .chain(target.dev_dependencies.iter())
+                            .chain(target.build_dependencies.iter())
+                    })
+                    .flatten(),
+            )
+            .map(|(dep_name, dep_info)| dep_name.to_owned())
+            .filter(|dep_name| crate_names.contains(dep_name))
+            .collect();
+        //let deps = get_dependencies(&name, &crate_names);
         for d in deps {
-            dep_graph
-                .entry(d)
-                .or_default()
-                .push((*name_to_path.get(name).unwrap()).to_owned());
+            dep_graph.entry(d).or_default().push(name.to_owned());
         }
     }
     dep_graph
