@@ -118,17 +118,17 @@ async fn main() {
         }
     }
 
+    // cascade update
+    // if a crate has a version bump, then all of it's consumers need at least
+    // a patch update
+    consumer_bump(&crates, &dep_graph, &mut bumps, &mut reasons);
+
     for (c, k) in reasons.iter() {
         println!("{} has a {:?} bump because of", c, bumps.get(c).unwrap());
         for (hash, description) in k.iter() {
             println!("\t{}", description);
         }
     }
-
-    // cascade update
-    // if a crate has a version bump, then all of it's consumers need at least
-    // a patch update
-    consumer_bump(&crates, &dep_graph, &mut bumps, &mut reasons);
 
     println!("bumps after cascade: {:?}", &bumps);
 
@@ -150,7 +150,7 @@ async fn main() {
         // we need to bump the version
         let v = versions.get(c).unwrap();
         let old_version = format!("version = \"{}\"", v);
-        let new_version = format!("version = \"{}", v.bump(*b));
+        let new_version = format!("version = \"{}\"", v.bump(*b));
         if *b == Bump::MINOR {
             println!("bumped: {}, {}", old_version, new_version);
         }
@@ -367,7 +367,7 @@ fn consumer_bump(
                         bumps.insert(consumer.clone(), Bump::PATCH);
                         reasons.insert(
                             consumer.clone(),
-                            vec![("META".to_owned(), "a dependency was update".to_owned())],
+                            vec![("META".to_owned(), "TRANSITIVE UPDATE".to_owned())],
                         );
                     }
                 }
