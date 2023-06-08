@@ -55,7 +55,6 @@ impl Version {
     fn bump(&self, bump: Bump) -> Self {
         let mut new = self.clone();
 
-        // how was this not working earlier?
         match bump {
             Bump::PATCH => new.patch += 1,
             Bump::MINOR => {
@@ -113,7 +112,7 @@ async fn main() {
     let mut reasons = HashMap::new();
     let mut bumps = HashMap::new();
     for c in crates.iter() {
-        if let Some((bump, reason)) = calculate_initial_bumps(c, crate_commits.get(*c).unwrap()) {
+        if let Some((bump, reason)) = calculate_initial_bumps(crate_commits.get(*c).unwrap()) {
             bumps.insert((*c).to_owned(), bump);
             reasons.insert((*c).to_owned(), reason);
         }
@@ -278,11 +277,6 @@ fn get_dependencies(name: &str, interest_list: &Vec<&str>) -> Vec<String> {
 }
 
 async fn get_release() -> (String, String) {
-    //return ("v1.17.1".to_owned(), "a6c8fbe52596564d632343e7cb4969954a1098ff".to_owned());
-    //return (
-    //    "v1.17.0".to_owned(),
-    //    "db9671be670549421845e5b869b7a2e0735d2aca".to_owned(),
-    //);
     let octocrab = octocrab::instance();
 
     let page = octocrab
@@ -324,7 +318,6 @@ fn get_crate_commits(krate: &str, previous_release_commit: &str) -> Vec<(String,
 }
 
 fn calculate_initial_bumps(
-    krate: &str,
     commits: &Vec<(String, String)>,
 ) -> Option<(Bump, Vec<(String, String)>)> {
     if commits.is_empty() {
@@ -387,81 +380,8 @@ fn consumer_bump(
     }
 }
 
-/// get_commits returns all of the commits that have happend since
-/// previous_release_commit
-fn get_commits(previous_release_commit: &str) -> Vec<(String, String)> {
-    // example output from the git log output
-    // 41adde17 failing attempt with single dependency tree
-    // 9d44dcde retrieve version and commit from github
-    // 7497f1ab initial commit of bumper crate
-
-    let git_commits = Command::new("git")
-        .arg("log")
-        .arg("--oneline")
-        // don't add extraenous information like branch name
-        .arg("--no-decorate")
-        // use the full commit hash because we aren't barbarians
-        .arg("--no-abbrev-commit")
-        // include all commits from the previous_release_commit to HEAD
-        .arg(format!("{previous_release_commit}..HEAD"))
-        .output()
-        .unwrap();
-    String::from_utf8(git_commits.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| line.split_once(' ').unwrap())
-        .map(|(hash, description)| (hash.to_owned(), description.to_owned()))
-        .collect()
-}
-
-/// `get_changed_files_range` will return all the files that have been changed
-/// after `previous_release_commit`.
-fn get_changed_files_range(previous_release_commit: &str) -> Vec<String> {
-    let file_diff = Command::new("git")
-        .arg("diff")
-        .arg(previous_release_commit)
-        .arg("--name-only")
-        .output()
-        .unwrap();
-    String::from_utf8(file_diff.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| line.to_owned())
-        .collect()
-}
-
-/// `get_changed_files` will get the files that were changed in a specific
-/// `commit` by shelling out to `git diff-tree`.
-fn get_changed_files(commit: &str) -> Vec<String> {
-    let file_diff = Command::new("git")
-        .arg("diff-tree")
-        .arg("--no-commit-id")
-        .arg("--name-only")
-        .arg(commit)
-        .arg("-r")
-        .output()
-        .unwrap();
-    String::from_utf8(file_diff.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| line.to_owned())
-        .collect()
-}
-
 fn crate_name_from_path(path: &str) -> &str {
     path.split_once("/").unwrap().1
-}
-
-fn get_changed_crates(changed_files: Vec<String>, crates: &Vec<&str>) -> Vec<String> {
-    crates
-        .iter()
-        .filter(|release_crate| {
-            changed_files
-                .iter()
-                .any(|file| file.starts_with(&format!("{}/", release_crate)))
-        })
-        .map(|release_crate| (*release_crate).to_owned())
-        .collect()
 }
 
 fn initialize_logger() {
@@ -471,10 +391,4 @@ fn initialize_logger() {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
-}
-
-/// get the reason that a particular crate had the specified version bump
-fn get_reasons(crates: &Vec<&str>, bumps: HashMap<String, Bump>) -> HashMap<String, Vec<String>> {
-    for c in crates {}
-    HashMap::new()
 }
