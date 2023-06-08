@@ -80,7 +80,7 @@ async fn main() {
         "quic/s2n-quic-tls",
         "quic/s2n-quic-tls-default",
         "quic/s2n-quic-transport",
-        "quic/s2n-quic-xdp",
+        "tools/xdp/s2n-quic-xdp",
         "common/s2n-codec",
     ];
 
@@ -211,23 +211,17 @@ fn build_dep_graph(
 
     let crate_names: Vec<String> = crates
         .iter()
-        .map(|path| path.split_once("/").unwrap().1.to_owned())
+        .map(|path| path.split("/").last().unwrap().to_owned())
         .collect();
 
     let mut name_to_path = HashMap::new();
     for (crate_path, crate_name) in std::iter::zip(crates, crate_names.clone()) {
         name_to_path.insert(crate_name, *crate_path);
     }
-    // we can not just look at the dependency graph for, e.g. s2n-quic, because
-    // some crates, like s2n-quic-rustls won't show up in it. So we look at each
+
     for name in crates.iter().cloned() {
-        println!("trying to get {:?}", name);
-        println!("manifest keys {:?}", manifests.keys());
         let manifest = manifests.get(name).unwrap();
-        //if name.contains("tls-default") {
-        //    println!("manifest target: {:?}", manifest.target);
-        //    panic!();
-        //}
+
         let deps: Vec<String> = manifest
             .dependencies
             .iter()
@@ -249,66 +243,17 @@ fn build_dep_graph(
             .map(|(dep_name, dep_info)| dep_name.to_owned())
             .filter(|dep_name| crate_names.contains(dep_name))
             .collect();
+        if name.contains("platform") {
+            println!("manifest target: {:?}", manifest);
+            println!("dependencies of {} were :{:?}", name, deps);
+            //panic!();
+        }
         //let deps = get_dependencies(&name, &crate_names);
         for d in deps {
             dep_graph.entry(d).or_default().push(name.to_owned());
         }
     }
     dep_graph
-}
-
-// need to switch dep graph to just use paths
-
-/// `get_dependencies` shells out to `cargo tree` to calculate the direct
-/// dependencies for the crate `name`. All crates except for those in
-/// `interest_list` are dropped from the dependency tree.
-fn get_dependencies(name: &str, interest_list: &Vec<&str>) -> Vec<String> {
-    // example output of the dep tree
-    // 0s2n-quic v1.17.1 (/home/ubuntu/workspace/s2n-quic/quic/s2n-quic)
-    // 1bytes v1.4.0
-    // 1cfg-if v1.0.0
-    // 1cuckoofilter v0.5.0
-    // 2byteorder v1.4.3
-    // 2fnv v1.0.7
-    // 2rand v0.7.3
-    // 3getrandom v0.1.16
-    // 4cfg-if v1.0.0
-    // 4libc v0.2.140
-    // 3libc v0.2.140
-    // 3rand_chacha v0.2.2
-    // 4ppv-lite86 v0.2.17
-
-    let dep_tree = Command::new("cargo")
-        .arg("tree")
-        .arg("-p")
-        .arg(name)
-        .arg("-e")
-        .arg("normal")
-        .arg("--prefix")
-        .arg("depth")
-        .output()
-        .unwrap();
-
-    // parse std out into a string
-    let output = String::from_utf8(dep_tree.stdout).unwrap();
-
-    // I could probably parse this more easily with a regex, but for now this is
-    // fine
-    output
-        .lines()
-        .map(|l| {
-            let depth_end = l.find(|c: char| c.is_alphabetic()).unwrap();
-            let depth = l[0..depth_end].parse::<u8>().unwrap();
-            let crate_name_end = l.find(' ').unwrap();
-            let crate_name = &l[depth_end..crate_name_end];
-            (depth, crate_name)
-        })
-        // only look at direct dependencies
-        .filter(|(depth, _name)| *depth == 1)
-        // we only care about the crates we publish
-        .filter(|(_depth, name)| interest_list.contains(name))
-        .map(|(_depth, name)| name.to_owned())
-        .collect()
 }
 
 async fn get_release() -> (String, String) {
@@ -416,7 +361,8 @@ fn consumer_bump(
 }
 
 fn crate_name_from_path(path: &str) -> &str {
-    path.split_once("/").unwrap().1
+    path.split("/").last().unwrap()
+    //path.split_once("/").unwrap().1
 }
 
 fn initialize_logger() {
