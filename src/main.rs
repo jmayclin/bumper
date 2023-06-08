@@ -99,77 +99,37 @@ async fn main() {
     info!("latest release: {version}");
     info!("latest release commit: {previous_release_commit}");
 
-    // get a list of all the commits that have happened since that release
-    let commits = get_commits(&previous_release_commit);
-
-    let changed_files = get_changed_files_range(&previous_release_commit);
-    let changed_crates = get_changed_crates(changed_files, &crates);
-    debug!("The following crates have had files changed:\n");
-    for c in changed_crates.iter() {
-        debug!("\t{c}");
+    // get a list of the commits that have touched each crate
+    let mut crate_commits = HashMap::new();
+    for c in crates.iter() {
+        crate_commits.insert(
+            (*c).to_owned(),
+            get_crate_commits(*c, &previous_release_commit),
+        );
     }
 
+    // everything that has been touched gets a patch bump
+    // if a commit has a "feat", then the crate gets a minor bump
+    let mut reasons = HashMap::new();
     let mut bumps = HashMap::new();
-
-    // each crate that has been changed needs at least a patch bump
-    for release_crate in changed_crates {
-        bumps.insert(release_crate, Bump::PATCH);
-    }
-    println!("bumps after patch: {:?}", &bumps);
-
-    let feat_files = commits
-        .iter()
-        .filter(|(_hash, description)| description.starts_with("feat"))
-        .inspect(|(_hash, description)| println!("feature commit found: {description}"))
-        .map(|(hash, _desciption)| get_changed_files(hash))
-        .inspect(|col| println!("{:?}", col))
-        .flatten()
-        .collect::<HashSet<String>>()
-        .into_iter()
-        .collect();
-    let changed_crates: Vec<String> = get_changed_crates(feat_files, &crates);
-    debug!("The following crates have had feature changes:\n");
-    for c in changed_crates.iter() {
-        debug!("\t{c}");
-    }
-
-    for release_crate in changed_crates {
-        bumps.insert(release_crate, Bump::MINOR);
-    }
-
-    debug!("{:?}", bumps);
-
-    // for any package that has been changed, it's consumers must at least do a
-    // minor bump to actually consume the updated dependency
-    loop {
-        // we have a "cascading" update as we go through the dependency chain,
-        // so keep looping until we have reached a steady state.
-        let mut change = false;
-        // iterate over the crates instead of bumps to avoid the mut borrow issues
-        // this loop could be much more efficient, but my computer is fast and I'm
-        // busy, so here we go
-        for release_crate in crates.iter() {
-            // if a crate is going to have a version bump, then all of the
-            // consumers must have at least a patch bump
-            if bumps.contains_key(*release_crate) {
-                let consumers = match dep_graph.get(crate_name_from_path(*release_crate)) {
-                    Some(c) => c,
-                    // might not have any consumers, in which case skip
-                    None => continue,
-                };
-                for consumer in consumers {
-                    if !bumps.contains_key(consumer) {
-                        change = true;
-                        bumps.insert(consumer.clone(), Bump::PATCH);
-                    }
-                }
-            }
-        }
-
-        if !change {
-            break;
+    for c in crates.iter() {
+        if let Some((bump, reason)) = calculate_initial_bumps(c, crate_commits.get(*c).unwrap()) {
+            bumps.insert((*c).to_owned(), bump);
+            reasons.insert((*c).to_owned(), reason);
         }
     }
+
+    for (c, k) in reasons.iter() {
+        println!("{} has a {:?} bump because of", c, bumps.get(c).unwrap());
+        for (hash, description) in k.iter() {
+            println!("\t{}", description);
+        }
+    }
+
+    // cascade update
+    // if a crate has a version bump, then all of it's consumers need at least
+    // a patch update
+    consumer_bump(&crates, &dep_graph, &mut bumps, &mut reasons);
 
     println!("bumps after cascade: {:?}", &bumps);
 
@@ -224,8 +184,10 @@ async fn main() {
     }
 
     for (crate_path, manifest) in manifests {
-        let name = crate_name_from_path(crate_path);
-        let mut output = std::fs::File::create(name).unwrap();
+        //let name = crate_name_from_path(crate_path);
+        let path = crate_path.to_owned() + "/Cargo.toml";
+        println!("writing to {path}");
+        let mut output = std::fs::File::create(path).unwrap();
         write!(output, "{}", manifest);
     }
 
@@ -333,6 +295,98 @@ async fn get_release() -> (String, String) {
     let commit = page.target_commitish;
     (version, commit)
 }
+
+fn get_crate_commits(krate: &str, previous_release_commit: &str) -> Vec<(String, String)> {
+    // example output from the git log output
+    // 41adde17 failing attempt with single dependency tree
+    // 9d44dcde retrieve version and commit from github
+    // 7497f1ab initial commit of bumper crate
+
+    let git_commits = Command::new("git")
+        .arg("log")
+        .arg("--oneline")
+        // don't add extraneous information like branch name
+        .arg("--no-decorate")
+        // use the full commit hash because we aren't barbarians
+        .arg("--no-abbrev-commit")
+        // include all commits from the previous_release_commit to HEAD
+        .arg(format!("{previous_release_commit}..origin/main"))
+        // only include commits that touched "crate" path
+        .arg(format!("{krate}"))
+        .output()
+        .unwrap();
+    String::from_utf8(git_commits.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_once(' ').unwrap())
+        .map(|(hash, description)| (hash.to_owned(), description.to_owned()))
+        .collect()
+}
+
+fn calculate_initial_bumps(
+    krate: &str,
+    commits: &Vec<(String, String)>,
+) -> Option<(Bump, Vec<(String, String)>)> {
+    if commits.is_empty() {
+        return None;
+    }
+
+    let feat_commit: Vec<(String, String)> = commits
+        .iter()
+        .cloned()
+        .filter(|(hash, description)| description.starts_with("feat"))
+        .collect();
+
+    if !feat_commit.is_empty() {
+        Some((Bump::MINOR, feat_commit))
+    } else {
+        Some((Bump::PATCH, commits.clone()))
+    }
+}
+
+fn consumer_bump(
+    crates: &Vec<&str>,
+    dep_graph: &HashMap<String, Vec<String>>,
+    bumps: &mut HashMap<String, Bump>,
+    reasons: &mut HashMap<String, Vec<(String, String)>>,
+) {
+    // for any package that has been changed, it's consumers must at least do a
+    // minor bump to actually consume the updated dependency
+    loop {
+        // we have a "cascading" update as we go through the dependency chain,
+        // so keep looping until we have reached a steady state.
+        let mut change = false;
+        // iterate over the crates instead of bumps to avoid the mut borrow issues
+        // this loop could be much more efficient, but my computer is fast and I'm
+        // busy, so here we go
+        for release_crate in crates.iter() {
+            // if a crate is going to have a version bump, then all of the
+            // consumers must have at least a patch bump
+            if bumps.contains_key(*release_crate) {
+                let consumers = match dep_graph.get(crate_name_from_path(*release_crate)) {
+                    Some(c) => c,
+                    // might not have any consumers, in which case skip
+                    None => continue,
+                };
+                for consumer in consumers {
+                    if !bumps.contains_key(consumer) {
+                        change = true;
+                        bumps.insert(consumer.clone(), Bump::PATCH);
+                        reasons.insert(
+                            consumer.clone(),
+                            vec![("META".to_owned(), "a dependency was update".to_owned())],
+                        );
+                    }
+                }
+            }
+        }
+
+        if !change {
+            break;
+        }
+    }
+}
+
 /// get_commits returns all of the commits that have happend since
 /// previous_release_commit
 fn get_commits(previous_release_commit: &str) -> Vec<(String, String)> {
@@ -411,16 +465,16 @@ fn get_changed_crates(changed_files: Vec<String>, crates: &Vec<&str>) -> Vec<Str
 }
 
 fn initialize_logger() {
-        // always write to the same file, and don't rotate it. This would be a
-        // bad idea for a long running process, but is useful to make sure that
-        // all the logs of our program end up in the same file.
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .init();
+    // always write to the same file, and don't rotate it. This would be a
+    // bad idea for a long running process, but is useful to make sure that
+    // all the logs of our program end up in the same file.
+    tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG)
+        .init();
 }
 
 /// get the reason that a particular crate had the specified version bump
 fn get_reasons(crates: &Vec<&str>, bumps: HashMap<String, Bump>) -> HashMap<String, Vec<String>> {
+    for c in crates {}
     HashMap::new()
-
 }
