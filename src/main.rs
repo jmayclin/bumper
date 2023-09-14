@@ -323,41 +323,48 @@ fn consumer_bump(
     bumps: &mut HashMap<String, Bump>,
     reasons: &mut HashMap<String, Vec<(String, String)>>,
 ) {
-    // for any package that has been changed, it's consumers must at least do a
-    // minor bump to actually consume the updated dependency
-    loop {
-        // we have a "cascading" update as we go through the dependency chain,
-        // so keep looping until we have reached a steady state.
-        let mut change = false;
-        // iterate over the crates instead of bumps to avoid the mut borrow issues
-        // this loop could be much more efficient, but my computer is fast and I'm
-        // busy, so here we go
-        for release_crate in crates.iter() {
-            // if a crate is going to have a version bump, then all of the
-            // consumers must have at least a patch bump
-            if bumps.contains_key(*release_crate) {
-                let consumers = match dep_graph.get(crate_name_from_path(*release_crate)) {
-                    Some(c) => c,
-                    // might not have any consumers, in which case skip
-                    None => continue,
-                };
-                for consumer in consumers {
-                    if !bumps.contains_key(consumer) {
-                        change = true;
-                        bumps.insert(consumer.clone(), Bump::PATCH);
-                        reasons.insert(
-                            consumer.clone(),
-                            vec![("META".to_owned(), "TRANSITIVE UPDATE".to_owned())],
-                        );
+    // s2n-quic uses a "strong transitive" approach to version bumping
+    for bump in [Bump::MINOR, Bump::PATCH] {
+        // for any package that has been changed, it's consumers must at least do a
+        // patch bump to actually consume the updated dependency
+        loop {
+            // we have a "cascading" update as we go through the dependency chain,
+            // so keep looping until we have reached a steady state.
+            let mut change = false;
+            // iterate over the crates instead of bumps to avoid the mut borrow issues
+            // this loop could be much more efficient, but my computer is fast and I'm
+            // busy, so here we go
+            for release_crate in crates.iter() {
+                // if a crate is going to have a version bump, then all of the
+                // consumers must have at least a patch bump
+                if bumps.contains_key(*release_crate) && *bumps.get(*release_crate).unwrap() == bump {
+                    let consumers = match dep_graph.get(crate_name_from_path(*release_crate)) {
+                        Some(c) => c,
+                        // might not have any consumers, in which case skip
+                        None => continue,
+                    };
+
+                    for consumer in consumers {
+
+                        if !bumps.contains_key(consumer) {
+                            change = true;
+
+                            bumps.insert(consumer.clone(), bump);
+                            reasons.insert(
+                                consumer.clone(),
+                                vec![("META".to_owned(), format!("TRANSITIVE UPDATE of {}", *release_crate))],
+                            );
+                        }
                     }
                 }
             }
-        }
 
-        if !change {
-            break;
+            if !change {
+                break;
+            }
         }
     }
+
 }
 
 fn crate_name_from_path(path: &str) -> &str {
